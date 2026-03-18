@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -24,7 +25,11 @@ import (
 // @Description Initializes all OIDC-related API endpoints for authentication and client management
 // @Tags OIDC
 func NewOidcController(group *gin.RouterGroup, authMiddleware *middleware.AuthMiddleware, fileSizeLimitMiddleware *middleware.FileSizeLimitMiddleware, oidcService *service.OidcService, jwtService *service.JwtService) {
-	oc := &OidcController{oidcService: oidcService, jwtService: jwtService}
+	oc := &OidcController{
+		oidcService:  oidcService,
+		jwtService:   jwtService,
+		createTokens: oidcService.CreateTokens,
+	}
 
 	group.POST("/oidc/authorize", authMiddleware.WithAdminNotRequired().Add(), oc.authorizeHandler)
 	group.POST("/oidc/authorization-required", authMiddleware.WithAdminNotRequired().Add(), oc.authorizationConfirmationRequiredHandler)
@@ -47,7 +52,7 @@ func NewOidcController(group *gin.RouterGroup, authMiddleware *middleware.AuthMi
 	group.POST("/oidc/clients/:id/secret", authMiddleware.Add(), oc.createClientSecretHandler)
 
 	group.GET("/oidc/clients/:id/logo", oc.getClientLogoHandler)
-	group.DELETE("/oidc/clients/:id/logo", oc.deleteClientLogoHandler)
+	group.DELETE("/oidc/clients/:id/logo", authMiddleware.Add(), oc.deleteClientLogoHandler)
 	group.POST("/oidc/clients/:id/logo", authMiddleware.Add(), fileSizeLimitMiddleware.Add(2<<20), oc.updateClientLogoHandler)
 
 	group.GET("/oidc/clients/:id/preview/:userId", authMiddleware.Add(), oc.getClientPreviewHandler)
@@ -69,8 +74,9 @@ func NewOidcController(group *gin.RouterGroup, authMiddleware *middleware.AuthMi
 }
 
 type OidcController struct {
-	oidcService *service.OidcService
-	jwtService  *service.JwtService
+	oidcService  *service.OidcService
+	jwtService   *service.JwtService
+	createTokens func(context.Context, dto.OidcCreateTokensDto) (service.CreatedTokens, error)
 }
 
 // authorizeHandler godoc
@@ -145,8 +151,13 @@ func (oc *OidcController) authorizationConfirmationRequiredHandler(c *gin.Contex
 // @Success 200 {object} dto.OidcTokenResponseDto "Token response with access_token and optional id_token and refresh_token"
 // @Router /api/oidc/token [post]
 func (oc *OidcController) createTokensHandler(c *gin.Context) {
+	// Per RFC-6749, parameters passed to the /token endpoint MUST be passed in the body of the request
+	// Gin's "ShouldBind" by default reads from the query string too, so we need to reset all query string args before invoking ShouldBind
+	c.Request.URL.RawQuery = ""
+
 	var input dto.OidcCreateTokensDto
-	if err := c.ShouldBind(&input); err != nil {
+	err := c.ShouldBind(&input)
+	if err != nil {
 		_ = c.Error(err)
 		return
 	}
@@ -165,10 +176,10 @@ func (oc *OidcController) createTokensHandler(c *gin.Context) {
 
 	// Client id and secret can also be passed over the Authorization header
 	if input.ClientID == "" && input.ClientSecret == "" {
-		input.ClientID, input.ClientSecret, _ = c.Request.BasicAuth()
+		input.ClientID, input.ClientSecret, _ = utils.OAuthClientBasicAuth(c.Request)
 	}
 
-	tokens, err := oc.oidcService.CreateTokens(c.Request.Context(), input)
+	tokens, err := oc.createTokens(c.Request.Context(), input)
 
 	switch {
 	case errors.Is(err, &common.OidcAuthorizationPendingError{}):
@@ -323,13 +334,15 @@ func (oc *OidcController) introspectTokenHandler(c *gin.Context) {
 		creds service.ClientAuthCredentials
 		ok    bool
 	)
-	creds.ClientID, creds.ClientSecret, ok = c.Request.BasicAuth()
+	creds.ClientID, creds.ClientSecret, ok = utils.OAuthClientBasicAuth(c.Request)
 	if !ok {
-		// If there's no basic auth, check if we have a bearer token
+		// If there's no basic auth, check if we have a bearer token (used as client assertion)
 		bearer, ok := utils.BearerAuth(c.Request)
 		if ok {
 			creds.ClientAssertionType = service.ClientAssertionTypeJWTBearer
 			creds.ClientAssertion = bearer
+			// When using client assertions, client_id can be passed as a form field
+			creds.ClientID = input.ClientID
 		}
 	}
 
@@ -652,15 +665,20 @@ func (oc *OidcController) updateAllowedUserGroupsHandler(c *gin.Context) {
 }
 
 func (oc *OidcController) deviceAuthorizationHandler(c *gin.Context) {
+	// Per RFC 8628 (OAuth 2.0 Device Authorization Grant), parameters for the device authorization request MUST be sent in the body of the POST request
+	// Gin's "ShouldBind" by default reads from the query string too, so we need to reset all query string args before invoking ShouldBind
+	c.Request.URL.RawQuery = ""
+
 	var input dto.OidcDeviceAuthorizationRequestDto
-	if err := c.ShouldBind(&input); err != nil {
+	err := c.ShouldBind(&input)
+	if err != nil {
 		_ = c.Error(err)
 		return
 	}
 
 	// Client id and secret can also be passed over the Authorization header
 	if input.ClientID == "" && input.ClientSecret == "" {
-		input.ClientID, input.ClientSecret, _ = c.Request.BasicAuth()
+		input.ClientID, input.ClientSecret, _ = utils.OAuthClientBasicAuth(c.Request)
 	}
 
 	response, err := oc.oidcService.CreateDeviceAuthorization(c.Request.Context(), input)

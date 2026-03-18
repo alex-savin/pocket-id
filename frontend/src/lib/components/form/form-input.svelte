@@ -41,7 +41,7 @@
 			placeholder?: string;
 			disabled?: boolean;
 			inputClass?: string;
-			type?: 'text' | 'password' | 'email' | 'number' | 'checkbox' | 'date';
+			type?: 'text' | 'password' | 'email' | 'number' | 'checkbox' | 'date' | 'url';
 			onInput?: (e: FormInputEvent) => void;
 		} = $props();
 
@@ -86,6 +86,6 @@
 		{/if}
 	{/if}
 	{#if input?.error}
-		<Field.Error>{input.error}</Field.Error>
+		<Field.Error class="text-start">{input.error}</Field.Error>
 	{/if}
 </Field.Field>

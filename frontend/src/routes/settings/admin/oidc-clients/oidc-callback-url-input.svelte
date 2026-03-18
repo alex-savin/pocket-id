@@ -31,6 +31,9 @@
 					<Input
 						aria-invalid={!!error}
 						data-testid={`callback-url-${i + 1}`}
+						type="text"
+						inputmode="url"
+  						autocomplete="url"
 						bind:value={callbackURLs[i]}
 					/>
 					<Button
